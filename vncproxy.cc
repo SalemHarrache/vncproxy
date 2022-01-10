@@ -322,25 +322,28 @@ int vnc_auth_callback(void* cb_args, int columns, char** values, char** column_n
 class VncOperator: public Runnable {
     PollMgr* poll_;
     int clnt_;
+    char client_ip_[NI_MAXHOST];
 public:
-    VncOperator(PollMgr* pmgr, int clnt)
+    VncOperator(PollMgr* pmgr, int clnt, char* client_ip)
             : poll_(pmgr), clnt_(clnt) {
+            strncpy(client_ip_, client_ip, NI_MAXHOST);
     }
 
     void run() {
+
         // ensure clnt socket is in blocking mode, so we can easily read/write full messages
         verify(set_nonblocking(clnt_, false) == 0);
 
         // vnc hand shake, only support protocol version 3.8
         if (send(clnt_, "RFB 003.008\n", 12, MSG_WAITALL) < 0) {
-            Log::error("error communicating with client");
+            Log::error("[%s] error communicating with client", client_ip_);
             close(clnt_);
             return;
         }
 
         char buf[16];
         if (recv(clnt_, buf, 12, MSG_WAITALL) < 0) {
-            Log::error("error communicating with client");
+            Log::error("[%s] error communicating with client", client_ip_);
             close(clnt_);
             return;
         }
@@ -348,7 +351,7 @@ public:
         buf[12] = '\0';
         //Log::debug("client protocol: %s", buf);
         if (strcmp(buf, "RFB 003.008\n") != 0) {
-            Log::info("client protocol not supported: %s", buf);
+            Log::info("[%s] client protocol not supported: %s", client_ip_, buf);
             close(clnt_);
             return;
         }
@@ -357,13 +360,13 @@ public:
         buf[0] = 1; // 1 security type available
         buf[1] = 2; // use VNC auth
         if (send(clnt_, buf, 2, MSG_WAITALL) < 0) {
-            Log::error("error communicating with client");
+            Log::error("[%s] error communicating with client", client_ip_);
             close(clnt_);
             return;
         }
 
         if (recv(clnt_, buf, 1, MSG_WAITALL) < 0) {
-            Log::error("error communicating with client");
+            Log::error("[%s] error communicating with client", client_ip_);
             close(clnt_);
             return;
         }
@@ -376,12 +379,12 @@ public:
             challenge[i] = rand() & 0xFF;
         }
         if (send(clnt_, challenge, sizeof(challenge), MSG_WAITALL) < 0) {
-            Log::error("error communicating with client");
+            Log::error("[%s] error communicating with client", client_ip_);
             close(clnt_);
             return;
         }
         if (recv(clnt_, response, sizeof(response), MSG_WAITALL) < 0) {
-            Log::error("error communicating with client");
+            Log::error("[%s] error communicating with client", client_ip_);
             close(clnt_);
             return;
         }
@@ -403,7 +406,7 @@ public:
 
         if (!auth_info.matched) {
             // tell client auth failed
-            Log::info("client authentication failed");
+            Log::info("[%s] client authentication failed", client_ip_);
             int32_t fail = 1;
             memcpy(buf, &fail, sizeof(fail));
             send(clnt_, buf, sizeof(fail), MSG_WAITALL);
@@ -412,7 +415,7 @@ public:
         }
         // no need to reply 'pass', leave this to remote side
 
-        Log::info("forward client_fd=%d to: %s", clnt_, auth_info.dest_addr.c_str());
+        Log::info("[%s] forward client_fd=%d to: %s", client_ip_, clnt_, auth_info.dest_addr.c_str());
 
         // now connect to remote vnc server
         int remote_fd = connect_to(auth_info.dest_addr.c_str());
@@ -518,7 +521,7 @@ public:
             return;
         }
 
-        Log::info("vnc forwarding established between client_fd=%d, remote_fd=%d", clnt_, remote_fd);
+        Log::info("[%s] vnc forwarding established between client_fd=%d, remote_fd=%d", client_ip_, clnt_, remote_fd);
 
         // tie the fd up, need nonblocking mode
         verify(set_nonblocking(clnt_, true) == 0);
@@ -608,6 +611,7 @@ int main(int argc, char* argv[]) {
     verify(sqlite3_exec(global_db, "create table if not exists vncproxy(forward_key varchar(8) primary key, dest_addr text not null, dest_passwd varchar(8))", NULL, NULL, NULL) == 0);
 
     struct addrinfo *result, *rp;
+    char client_ip[NI_MAXHOST];
     int server_sock = bind_on(bind_addr, &result, &rp);
     if (server_sock < 0) {
         exit(1);
@@ -640,8 +644,9 @@ int main(int argc, char* argv[]) {
 
         int clnt_socket = accept(server_sock, rp->ai_addr, &rp->ai_addrlen);
         if (clnt_socket >= 0) {
-            Log::info("got new client connection, fd: %d", clnt_socket);
-            thpool->run_async(new VncOperator(poll, clnt_socket));
+            getnameinfo(rp->ai_addr, rp->ai_addrlen, client_ip, NI_MAXHOST, NULL, 0, NI_NUMERICHOST);
+            Log::info("[%s] got new client connection, fd: %d", client_ip, clnt_socket);
+            thpool->run_async(new VncOperator(poll, clnt_socket, client_ip));
         }
     }
 
